@@ -8,7 +8,8 @@ use dbus_tokio::{
     tree::{AFactory, ATree, ATreeServer},
     AConnection,
 };
-use futures::{sync::oneshot, Async, Future, Poll, Stream};
+use futures::task::Poll;
+use futures::{sync::oneshot, Future, Poll, Stream};
 use librespot::{
     connect::spirc::Spirc,
     core::{
@@ -24,11 +25,9 @@ use rspotify::spotify::{
     util::datetime_to_timestamp,
 };
 use std::{collections::HashMap, env, rc::Rc, thread};
-use tokio_core::reactor::Handle;
 
 pub struct DbusServer {
     session: Session,
-    handle: Handle,
     spirc: Rc<Spirc>,
     api_token: RspotifyToken,
     token_request: Option<Box<dyn Future<Item = LibrespotToken, Error = MercuryError>>>,
@@ -45,15 +44,9 @@ const SCOPE: &str = "user-read-playback-state,user-read-private,\
                      user-read-recently-played";
 
 impl DbusServer {
-    pub fn new(
-        session: Session,
-        handle: Handle,
-        spirc: Rc<Spirc>,
-        device_name: String,
-    ) -> DbusServer {
+    pub fn new(session: Session, spirc: Rc<Spirc>, device_name: String) -> DbusServer {
         DbusServer {
             session,
-            handle,
             spirc,
             api_token: RspotifyToken::default(),
             token_request: None,
@@ -79,13 +72,12 @@ impl Future for DbusServer {
         let mut got_new_token = false;
         if self.is_token_expired() {
             if let Some(ref mut fut) = self.token_request {
-                if let Async::Ready(token) = fut.poll().unwrap() {
+                if let Poll::Ready(token) = fut.poll().unwrap() {
                     self.api_token = RspotifyToken::default()
                         .access_token(&token.access_token)
                         .expires_in(token.expires_in)
                         .expires_at(datetime_to_timestamp(token.expires_in));
                     self.dbus_future = Some(create_dbus_server(
-                        self.handle.clone(),
                         self.api_token.clone(),
                         self.spirc.clone(),
                         self.device_name.clone(),
@@ -106,7 +98,7 @@ impl Future for DbusServer {
             self.token_request = None;
         }
 
-        Ok(Async::NotReady)
+        Ok(Poll::Pending)
     }
 }
 
@@ -115,7 +107,6 @@ fn create_spotify_api(token: &RspotifyToken) -> Spotify {
 }
 
 fn create_dbus_server(
-    handle: Handle,
     api_token: RspotifyToken,
     spirc: Rc<Spirc>,
     device_name: String,
@@ -607,8 +598,8 @@ fn create_dbus_server(
     tree.set_registered(&connection, true)
         .expect("Failed to register tree");
 
-    let async_connection = AConnection::new(connection.clone(), handle)
-        .expect("Failed to create async dbus connection");
+    let async_connection =
+        AConnection::new(connection.clone()).expect("Failed to create async dbus connection");
 
     let server = ATreeServer::new(
         connection,
